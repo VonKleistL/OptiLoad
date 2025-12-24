@@ -110,3 +110,9 @@ MIT License - see LICENSE file for details
 ## Support
 
 For issues, feature requests, or contributions, visit the GitHub repository.
+
+Support the developer and request new features - https://www.paypal.me/LukeVonKleist
+
+Built for the Apple Silicon Mac community by VonKleistL
+
+macOS Apple Silicon
