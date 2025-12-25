@@ -2,7 +2,8 @@
 
 A high-performance download manager for macOS that replaces your browser's default download system with intelligent, accelerated downloads.
 
-<img width="1656" height="1230" alt="CleanShot 2025-12-24 at 13 46 18@2x" src="https://github.com/user-attachments/assets/5988b686-01f3-478d-b4ec-692815ed625e" />
+
+<img width="1656" height="1230" alt="530009638-5988b686-01f3-478d-b4ec-692815ed625e" src="https://github.com/user-attachments/assets/06ddd881-62cf-4088-861d-2ccddb02f419" />
 
 <img width="1678" height="1278" alt="CleanShot 2025-12-24 at 13 34 52@2x" src="https://github.com/user-attachments/assets/a3396b1a-9262-4f8b-b300-4d79417a1693" />
 
