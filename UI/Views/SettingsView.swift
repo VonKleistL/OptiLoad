@@ -9,7 +9,6 @@ struct SettingsView: View {
         ZStack {
             GlassTheme.primaryGradient
                 .ignoresSafeArea()
-            
             SettingsContent(selectedTab: $selectedTab, settings: settings, dismiss: dismiss)
         }
         .frame(width: 700, height: 600)
@@ -20,7 +19,6 @@ struct SettingsContent: View {
     @Binding var selectedTab: Int
     let settings: AppSettings
     let dismiss: DismissAction
-    
     let settingsTabs = ["General", "Downloads", "Network"]
     
     var body: some View {
@@ -40,9 +38,7 @@ struct SettingsHeader: View {
             Text("Settings")
                 .font(.system(size: 28, weight: .bold))
                 .foregroundColor(.white)
-            
             Spacer()
-            
             Button(action: { dismiss() }) {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 24))
@@ -94,7 +90,7 @@ struct TabButton: View {
                         }
                     }
                 )
-                .contentShape(Rectangle())  // FULL CLICKABLE AREA
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -138,7 +134,6 @@ struct GeneralSettingsContent: View {
                 .frame(width: 200)
             }
             
-            // FIXED: // Window Opacity Slider - 0% to 100% range
             SettingRow(title: "Window Opacity", subtitle: "\(Int(settings.windowOpacity * 100))%") {
                 Slider(value: $settings.windowOpacity, in: 0.0...1.0, step: 0.05)
                     .frame(width: 200)
@@ -153,8 +148,10 @@ struct GeneralSettingsContent: View {
 }
 
 // MARK: - Download Settings
+// ✅ CHANGE: Replaced Stepper with TextField + arrow buttons for direct input
 struct DownloadSettingsContent: View {
     @Bindable var settings: AppSettings
+    @FocusState private var isConnectionFieldFocused: Bool
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -164,13 +161,50 @@ struct DownloadSettingsContent: View {
             SettingToggle(title: "Skip Web Pages", isOn: $settings.skipWebPages)
             SettingToggle(title: "Use Server Time", isOn: $settings.useServerTime)
             
-            SettingRow(title: "Max Connections", subtitle: "Per download (1-32)") {
-                Stepper("\(settings.maxConnections)", value: $settings.maxConnections, in: 1...32)
-                    .frame(width: 120)
+            SettingRow(title: "Max Connections", subtitle: "Per download (1-128)") {
+                HStack(spacing: 8) {
+                    TextField("", value: $settings.maxConnections, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                        .multilineTextAlignment(.center)
+                        .focused($isConnectionFieldFocused)
+                        .onChange(of: settings.maxConnections) { oldValue, newValue in
+                            // Clamp value between 1 and 128
+                            if newValue < 1 {
+                                settings.maxConnections = 1
+                            } else if newValue > 128 {
+                                settings.maxConnections = 128
+                            }
+                            settings.saveSettings()
+                        }
+                    
+                    VStack(spacing: 2) {
+                        Button(action: {
+                            if settings.maxConnections < 128 {
+                                settings.maxConnections += 1
+                            }
+                        }) {
+                            Image(systemName: "chevron.up")
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.7))
+                                .frame(width: 24, height: 14)
+                        }
+                        .buttonStyle(.plain)
+                        
+                        Button(action: {
+                            if settings.maxConnections > 1 {
+                                settings.maxConnections -= 1
+                            }
+                        }) {
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 10))
+                                .foregroundColor(.white.opacity(0.7))
+                                .frame(width: 24, height: 14)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
             }
-        }
-        .onChange(of: settings.maxConnections) { _, _ in
-            settings.saveSettings()
         }
     }
 }
@@ -235,9 +269,7 @@ struct SettingRow<Content: View>: View {
                         .foregroundColor(GlassTheme.textSecondary)
                 }
             }
-            
             Spacer()
-            
             content
         }
         .padding(16)
