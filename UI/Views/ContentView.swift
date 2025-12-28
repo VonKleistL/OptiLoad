@@ -43,8 +43,8 @@ struct ContentView: View {
                                 let downloads = Array(downloadManager.activeDownloads.values)
                                 
                                 if selectedTab == 0 {
-                                    // Downloading
-                                    ForEach(downloads.filter { $0.status == .downloading }, id: \.id) { download in
+                                    // Downloading - ✅ FIXED: Include paused downloads
+                                    ForEach(downloads.filter { $0.status == .downloading || $0.status == .paused }, id: \.id) { download in
                                         DownloadRow(download: download)
                                     }
                                 } else if selectedTab == 1 {
