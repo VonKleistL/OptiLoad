@@ -74,14 +74,23 @@ class DownloadServer {
            let url = URL(string: urlString) {
             
             let filename = json["filename"] as? String ?? url.lastPathComponent
+            // ✅ CHANGE: Extract cookies and headers from JSON
+            let cookies = json["cookies"] as? String ?? ""
+            let headers = json["headers"] as? [String: String] ?? [:]
             
             print("📥 Download request: \(filename)")
             print("🔗 URL: \(urlString)")
+            // ✅ CHANGE: Log cookies presence
+            print("🍪 Cookies: \(cookies.isEmpty ? "none" : "present")")
             
-            // Add to download queue using Task for async context
+            // ✅ CHANGE: Pass cookies and headers to addDownload
             let urlCopy = url
             Task { @MainActor in
-                try? await DownloadManager.shared.addDownload(url: urlCopy)
+                try? await DownloadManager.shared.addDownload(
+                    url: urlCopy,
+                    cookies: cookies,
+                    headers: headers
+                )
             }
             
             sendResponse(connection: connection, statusCode: 200, body: "{\"success\":true}")
