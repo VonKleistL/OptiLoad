@@ -45,6 +45,7 @@ struct DownloadRow: View {
             // Action buttons
             HStack(spacing: 8) {
                 if download.status == .downloading || download.status == .paused {
+                    // Pause/Resume button
                     Button(action: {
                         if download.status == .downloading {
                             Task {
@@ -61,8 +62,21 @@ struct DownloadRow: View {
                             .foregroundColor(.white.opacity(0.7))
                     }
                     .buttonStyle(.plain)
+                    
+                    // Cancel button (X)
+                    Button(action: {
+                        Task {
+                            await downloadManager.cancelDownload(download)
+                        }
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(.red.opacity(0.7))
+                    }
+                    .buttonStyle(.plain)
                 }
                 
+                // Info button
                 Button(action: {}) {
                     Image(systemName: "info.circle")
                         .font(.system(size: 20))
@@ -73,6 +87,14 @@ struct DownloadRow: View {
         }
         .padding(12)
         .glassMorphic()
+        // ✅ NEW: Animated purple border for completed downloads
+        .overlay(
+            Group {
+                if download.status == .completed {
+                    AnimatedPurpleBorder()
+                }
+            }
+        )
     }
     
     private var statusText: String {
@@ -109,6 +131,29 @@ struct DownloadRow: View {
     }
 }
 
+// ✅ NEW: Animated purple border that runs clockwise
+struct AnimatedPurpleBorder: View {
+    @State private var rotation: Double = 0
+    
+    var body: some View {
+        RoundedRectangle(cornerRadius: 12)
+            .trim(from: 0, to: 0.25) // 25% of the border visible
+            .stroke(
+                AngularGradient(
+                    gradient: Gradient(colors: [.purple, .purple.opacity(0)]),
+                    center: .center
+                ),
+                style: StrokeStyle(lineWidth: 3, lineCap: .round)
+            )
+            .rotationEffect(.degrees(rotation))
+            .onAppear {
+                withAnimation(.linear(duration: 1.5)) {
+                    rotation = 360
+                }
+            }
+    }
+}
+
 // Mini waveform animation
 struct WaveformMini: View {
     @State private var animate = false
@@ -121,8 +166,8 @@ struct WaveformMini: View {
                     .frame(width: 3, height: animate ? CGFloat.random(in: 4...12) : 4)
                     .animation(
                         .easeInOut(duration: 0.5)
-                        .repeatForever()
-                        .delay(Double(index) * 0.1),
+                            .repeatForever()
+                            .delay(Double(index) * 0.1),
                         value: animate
                     )
             }
