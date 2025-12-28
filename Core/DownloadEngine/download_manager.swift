@@ -10,7 +10,10 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
     var totalDownloaded: Int64 = 0
     
     private var downloadTasks: [UUID: URLSessionDownloadTask] = [:]
-    private var chunkTasks: [UUID: [Int: URLSessionDownloadTask]] = [:] // For multi-threaded
+    private var chunkTasks: [UUID: [Int: URLSessionDownloadTask]] = [:]
+    private var downloadCookies: [UUID: String] = [:]
+    private var downloadHeaders: [UUID: [String: String]] = [:]
+    private var downloadResumeData: [UUID: Data] = [:]
     private var speedTimer: Timer?
     private var lastMeasurement: (bytes: Int64, time: Date)?
     
@@ -20,64 +23,81 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
         super.init()
         
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
-        config.timeoutIntervalForResource = 3600
-        config.httpMaximumConnectionsPerHost = 32 // Allow more connections
+        config.timeoutIntervalForRequest = 300
+        config.timeoutIntervalForResource = 7200
+        config.httpMaximumConnectionsPerHost = 64
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         config.tlsMinimumSupportedProtocolVersion = .TLSv12
         config.waitsForConnectivity = true
+        config.urlCache = nil
+        config.httpShouldUsePipelining = false
+        config.allowsCellularAccess = true
+        config.isDiscretionary = false
         
         self.session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         
         startSpeedMonitoring()
     }
     
-    func addDownload(url: URL) async throws {
+    func addDownload(url: URL, cookies: String = "", headers: [String: String] = [:]) async throws {
         print("🚀 Starting download for: \(url)")
         
-        // Get file metadata
-        let (filesize, filename, supportsRange) = try await fetchMetadata(for: url)
+        let (filesize, filename, supportsRange) = try await fetchMetadata(for: url, cookies: cookies, headers: headers)
         print("📦 File: \(filename), Size: \(filesize) bytes, Range support: \(supportsRange)")
         
-        // Create download object
         let download = Download(url: url, filename: filename, filesize: filesize)
         download.destinationPath = AppSettings.shared.downloadFolder.appendingPathComponent(filename).path
         
         activeDownloads[download.id] = download
         
-        // Start download
+        if !cookies.isEmpty {
+            downloadCookies[download.id] = cookies
+        }
+        if !headers.isEmpty {
+            downloadHeaders[download.id] = headers
+        }
+        
         await startDownload(download)
     }
     
-    // MARK: - Start/Resume Download
+    // ✅ FIX: Force single-threaded for MediaFire to avoid 70MB cutoff
     private func startDownload(_ download: Download) async {
-        // Use multi-threading if range requests are supported
-        if download.filesize > 1024 * 1024 * 5 { // 5MB minimum for multi-threading
+        let isMediaFire = download.url.host?.contains("mediafire.com") ?? false
+        
+        if isMediaFire {
+            print("🔥 MediaFire detected - using single-threaded download")
+            await startSimpleDownload(download)
+        } else if download.filesize > 1024 * 1024 * 2 {
             await startMultiThreadedDownload(download)
         } else {
             await startSimpleDownload(download)
         }
     }
     
-    // MARK: - Pause/Resume
+    // MARK: - Pause/Resume/Cancel
     func pauseDownload(_ download: Download) async {
         await MainActor.run {
             download.status = .paused
             print("⏸️ Download paused: \(download.filename)")
         }
         
-        // Cancel active tasks
+        // For simple downloads: cancel with resume data
         if let task = downloadTasks[download.id] {
-            task.cancel()
+            task.cancel(byProducingResumeData: { [weak self] resumeData in
+                if let data = resumeData {
+                    print("💾 Saved resume data: \(data.count) bytes")
+                    self?.downloadResumeData[download.id] = data
+                }
+            })
             downloadTasks.removeValue(forKey: download.id)
         }
         
-        // Cancel chunk tasks
+        // For multi-threaded downloads: SUSPEND (don't cancel, don't remove from dictionary)
         if let chunks = chunkTasks[download.id] {
             for (_, task) in chunks {
-                task.cancel()
+                task.suspend()
             }
-            chunkTasks.removeValue(forKey: download.id)
+            print("⏸️ Suspended \(chunks.count) chunk tasks")
         }
     }
     
@@ -87,8 +107,54 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
             print("▶️ Resuming download: \(download.filename)")
         }
         
-        // Restart the download from where it left off
-        await startDownload(download)
+        // Check if we have suspended tasks (multi-threaded)
+        if let chunks = chunkTasks[download.id], !chunks.isEmpty {
+            // Resume suspended tasks
+            for (_, task) in chunks {
+                task.resume()
+            }
+            print("♻️ Resumed \(chunks.count) suspended chunk tasks")
+        } else {
+            // No suspended tasks, start fresh
+            await startDownload(download)
+        }
+    }
+    
+    func cancelDownload(_ download: Download) async {
+        await MainActor.run {
+            print("❌ Download cancelled: \(download.filename)")
+        }
+        
+        // Cancel simple download task
+        if let task = downloadTasks[download.id] {
+            task.cancel()
+            downloadTasks.removeValue(forKey: download.id)
+        }
+        
+        // Cancel multi-threaded chunk tasks
+        if let chunks = chunkTasks[download.id] {
+            for (_, task) in chunks {
+                task.cancel()
+            }
+            chunkTasks.removeValue(forKey: download.id)
+        }
+        
+        // Clean up temporary chunk files
+        let tempDir = FileManager.default.temporaryDirectory
+        for i in 0..<download.chunks.count {
+            let chunkFile = tempDir.appendingPathComponent("\(download.id.uuidString)_chunk_\(i)")
+            try? FileManager.default.removeItem(at: chunkFile)
+        }
+        
+        // Clean up metadata
+        downloadCookies.removeValue(forKey: download.id)
+        downloadHeaders.removeValue(forKey: download.id)
+        downloadResumeData.removeValue(forKey: download.id)
+        
+        // Remove from active downloads
+        await MainActor.run {
+            activeDownloads.removeValue(forKey: download.id)
+        }
     }
     
     // MARK: - Multi-threaded Download
@@ -100,7 +166,6 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
         
         print("⚡ Starting multi-threaded download with \(maxConnections) connections")
         
-        // Create chunks if not already created
         if download.chunks.isEmpty {
             var chunks: [DownloadChunk] = []
             for i in 0..<maxConnections {
@@ -118,20 +183,30 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
             download.chunks = chunks
         }
         
-        // Start downloading each chunk
         chunkTasks[download.id] = [:]
         
         for (index, chunk) in download.chunks.enumerated() {
-            // Skip completed chunks (for resume)
             if chunk.isComplete { continue }
             
             var request = URLRequest(url: download.url)
+            request.timeoutInterval = 300
             let resumeStart = chunk.startByte + chunk.downloadedBytes
             request.setValue("bytes=\(resumeStart)-\(chunk.endByte)", forHTTPHeaderField: "Range")
             request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+            request.setValue("gzip, deflate, br", forHTTPHeaderField: "Accept-Encoding")
+            
+            if let cookies = downloadCookies[download.id] {
+                request.setValue(cookies, forHTTPHeaderField: "Cookie")
+            }
+            
+            if let headers = downloadHeaders[download.id] {
+                for (key, value) in headers {
+                    request.setValue(value, forHTTPHeaderField: key)
+                }
+            }
             
             let task = session.downloadTask(with: request)
-            task.taskDescription = "\(download.id.uuidString)|\(index)" // Store download ID and chunk index
+            task.taskDescription = "\(download.id.uuidString)|\(index)"
             chunkTasks[download.id]?[index] = task
             
             print("📥 Starting chunk \(index): bytes \(resumeStart)-\(chunk.endByte)")
@@ -144,14 +219,33 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
         download.status = .downloading
         
         var request = URLRequest(url: download.url)
+        request.timeoutInterval = 300
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
+        request.setValue("gzip, deflate, br", forHTTPHeaderField: "Accept-Encoding")
         
-        // Resume if partially downloaded
-        if download.downloadedBytes > 0 {
-            request.setValue("bytes=\(download.downloadedBytes)-", forHTTPHeaderField: "Range")
+        if let cookies = downloadCookies[download.id] {
+            request.setValue(cookies, forHTTPHeaderField: "Cookie")
         }
         
-        let task = session.downloadTask(with: request)
+        if let headers = downloadHeaders[download.id] {
+            for (key, value) in headers {
+                request.setValue(value, forHTTPHeaderField: key)
+            }
+        }
+        
+        let task: URLSessionDownloadTask
+        
+        if let resumeData = downloadResumeData[download.id] {
+            print("♻️ Resuming from saved data: \(resumeData.count) bytes")
+            task = session.downloadTask(withResumeData: resumeData)
+            downloadResumeData.removeValue(forKey: download.id)
+        } else if download.downloadedBytes > 0 {
+            request.setValue("bytes=\(download.downloadedBytes)-", forHTTPHeaderField: "Range")
+            task = session.downloadTask(with: request)
+        } else {
+            task = session.downloadTask(with: request)
+        }
+        
         task.taskDescription = download.id.uuidString
         downloadTasks[download.id] = task
         
@@ -171,11 +265,9 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
             return
         }
         
-        // Handle multi-threaded chunk completion
         if components.count > 1, let chunkIndex = Int(components[1]) {
             handleChunkCompletion(download: download, chunkIndex: chunkIndex, location: location)
         } else {
-            // Handle simple download completion
             handleSimpleCompletion(download: download, location: location)
         }
     }
@@ -185,10 +277,8 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
         
         guard chunkIndex < download.chunks.count else { return }
         
-        // Mark chunk as complete
         download.chunks[chunkIndex].isComplete = true
         
-        // Save chunk to temp file
         let tempDir = FileManager.default.temporaryDirectory
         let chunkFile = tempDir.appendingPathComponent("\(download.id.uuidString)_chunk_\(chunkIndex)")
         
@@ -198,7 +288,6 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
             }
             try FileManager.default.moveItem(at: location, to: chunkFile)
             
-            // Check if all chunks are complete
             if download.chunks.allSatisfy({ $0.isComplete }) {
                 print("🎉 All chunks complete, combining...")
                 combineChunks(download: download)
@@ -214,23 +303,23 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
         let destinationURL = URL(fileURLWithPath: download.destinationPath)
         
         do {
-            // Remove existing file if present
             if FileManager.default.fileExists(atPath: destinationURL.path) {
                 try FileManager.default.removeItem(at: destinationURL)
             }
             
-            // Create output file
             FileManager.default.createFile(atPath: destinationURL.path, contents: nil)
             let fileHandle = try FileHandle(forWritingTo: destinationURL)
             
-            // Combine all chunks in order
             let tempDir = FileManager.default.temporaryDirectory
+            
             for i in 0..<download.chunks.count {
-                let chunkFile = tempDir.appendingPathComponent("\(download.id.uuidString)_chunk_\(i)")
-                
-                if let chunkData = try? Data(contentsOf: chunkFile) {
-                    fileHandle.write(chunkData)
-                    try? FileManager.default.removeItem(at: chunkFile) // Clean up
+                try autoreleasepool {
+                    let chunkFile = tempDir.appendingPathComponent("\(download.id.uuidString)_chunk_\(i)")
+                    
+                    if let chunkData = try? Data(contentsOf: chunkFile) {
+                        fileHandle.write(chunkData)
+                        try? FileManager.default.removeItem(at: chunkFile)
+                    }
                 }
             }
             
@@ -242,7 +331,9 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
             
             print("✅ Download completed: \(download.filename)")
             
-            // Clean up
+            downloadCookies.removeValue(forKey: download.id)
+            downloadHeaders.removeValue(forKey: download.id)
+            downloadResumeData.removeValue(forKey: download.id)
             chunkTasks.removeValue(forKey: download.id)
             
         } catch {
@@ -268,6 +359,9 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
             
             print("✅ Download completed: \(download.filename)")
             
+            downloadCookies.removeValue(forKey: download.id)
+            downloadHeaders.removeValue(forKey: download.id)
+            downloadResumeData.removeValue(forKey: download.id)
             downloadTasks.removeValue(forKey: download.id)
             
         } catch {
@@ -286,15 +380,12 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
               let download = activeDownloads[downloadID] else { return }
         
         if components.count > 1, let chunkIndex = Int(components[1]) {
-            // Update chunk progress
             if chunkIndex < download.chunks.count {
                 download.chunks[chunkIndex].downloadedBytes = totalBytesWritten
             }
             
-            // Calculate total downloaded across all chunks
             download.downloadedBytes = download.chunks.reduce(0) { $0 + $1.downloadedBytes }
         } else {
-            // Simple download progress
             download.downloadedBytes = totalBytesWritten
             
             if totalBytesExpectedToWrite > 0 && download.filesize != totalBytesExpectedToWrite {
@@ -302,7 +393,6 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
             }
         }
         
-        // Calculate speed
         if let startTime = download.startedAt {
             let elapsed = Date().timeIntervalSince(startTime)
             download.speed = elapsed > 0 ? Double(download.downloadedBytes) / elapsed : 0
@@ -311,35 +401,58 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
     
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error = error {
-            print("❌ Download task failed: \(error.localizedDescription)")
-            
             guard let taskDesc = task.taskDescription,
                   let downloadID = UUID(uuidString: taskDesc.components(separatedBy: "|").first ?? ""),
                   let download = activeDownloads[downloadID] else { return }
             
-            // Don't mark as failed if it was a cancellation (pause)
-            if (error as NSError).code != NSURLErrorCancelled {
+            let nsError = error as NSError
+            
+            // Check if error is cancellation
+            if nsError.code == NSURLErrorCancelled {
+                // Only treat as failure if download is NOT paused
+                if download.status != .paused {
+                    print("⚠️ Download task cancelled unexpectedly: \(download.filename)")
+                    download.status = .failed
+                    download.errorMessage = "Download cancelled"
+                } else {
+                    // Expected cancellation due to pause - this is normal
+                    print("✅ Task cancelled for pause (expected)")
+                }
+            } else {
+                // Real error - not a cancellation
+                print("❌ Download task failed: \(error.localizedDescription)")
                 download.status = .failed
                 download.errorMessage = error.localizedDescription
             }
             
             downloadTasks.removeValue(forKey: downloadID)
-            chunkTasks.removeValue(forKey: downloadID)
+            // DON'T remove chunkTasks here if paused - they're suspended, not cancelled
+            if download.status != .paused {
+                chunkTasks.removeValue(forKey: downloadID)
+            }
         }
     }
     
     // MARK: - Metadata Fetch
-    private func fetchMetadata(for url: URL) async throws -> (Int64, String, Bool) {
+    private func fetchMetadata(for url: URL, cookies: String = "", headers: [String: String] = [:]) async throws -> (Int64, String, Bool) {
         print("🔍 Fetching metadata for: \(url)")
         
         var request = URLRequest(url: url)
         request.httpMethod = "HEAD"
-        request.timeoutInterval = 10 // Shorter timeout
+        request.timeoutInterval = 10
         request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
         request.setValue("*/*", forHTTPHeaderField: "Accept")
         
+        if !cookies.isEmpty {
+            request.setValue(cookies, forHTTPHeaderField: "Cookie")
+        }
+        
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        
         do {
-            let (_, response) = try await URLSession.shared.data(for: request) // Use separate session
+            let (_, response) = try await URLSession.shared.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw DownloadError.invalidResponse
@@ -350,7 +463,6 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
             let filesize = httpResponse.expectedContentLength > 0 ? httpResponse.expectedContentLength : 104857600
             let filename = httpResponse.suggestedFilename ?? url.lastPathComponent
             
-            // Check for range support
             let acceptRanges = httpResponse.value(forHTTPHeaderField: "Accept-Ranges")
             let supportsRange = acceptRanges?.lowercased() == "bytes"
             
@@ -361,28 +473,30 @@ final class DownloadManager: NSObject, URLSessionDownloadDelegate {
         } catch {
             print("⚠️ Metadata fetch failed: \(error.localizedDescription)")
             
-            // Try a GET request with Range header to test support
             var testRequest = URLRequest(url: url)
             testRequest.setValue("bytes=0-0", forHTTPHeaderField: "Range")
             testRequest.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", forHTTPHeaderField: "User-Agent")
             testRequest.timeoutInterval = 5
             
+            if !cookies.isEmpty {
+                testRequest.setValue(cookies, forHTTPHeaderField: "Cookie")
+            }
+            
             do {
                 let (_, testResponse) = try await URLSession.shared.data(for: testRequest)
                 if let httpResponse = testResponse as? HTTPURLResponse {
-                    let supportsRange = httpResponse.statusCode == 206 // Partial Content
+                    let supportsRange = httpResponse.statusCode == 206
                     print("📊 Range test: status=\(httpResponse.statusCode), supports=\(supportsRange)")
                     
                     let filename = url.lastPathComponent.isEmpty ? "download" : url.lastPathComponent
-                    return (104857600, filename, supportsRange) // Default size, but with correct range support
+                    return (104857600, filename, supportsRange)
                 }
             } catch {
                 print("⚠️ Range test also failed")
             }
             
-            // Final fallback
             let filename = url.lastPathComponent.isEmpty ? "download" : url.lastPathComponent
-            return (104857600, filename, true) // ASSUME range support - most servers do
+            return (104857600, filename, true)
         }
     }
     
