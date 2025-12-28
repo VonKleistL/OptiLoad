@@ -7,7 +7,7 @@ class AppSettings {
     
     // Appearance
     var theme: AppTheme = .auto
-    var windowOpacity: Double = 0.85  // NEW: Transparency control
+    var windowOpacity: Double = 0.85
     
     // General
     var launchAtStartup: Bool = false
@@ -22,7 +22,8 @@ class AppSettings {
     var useServerTime: Bool = true
     
     // Network
-    var maxConnections: Int = 8
+    // ✅ CHANGE: Increased default from 8 to 16, and max limit from 32 to 128
+    var maxConnections: Int = 16
     var speedLimit: Int = 0
     var interceptBrowser: Bool = true
     var startWithoutConfirmation: Bool = false
@@ -58,6 +59,7 @@ class AppSettings {
            let url = URL(string: folderPath) {
             downloadFolder = url
         }
+        
         autoRemoveDeleted = UserDefaults.standard.bool(forKey: "autoRemoveDeleted")
         autoRemoveCompleted = UserDefaults.standard.bool(forKey: "autoRemoveCompleted")
         autoRetryFailed = UserDefaults.standard.bool(forKey: "autoRetryFailed")
@@ -65,8 +67,9 @@ class AppSettings {
         useServerTime = UserDefaults.standard.bool(forKey: "useServerTime")
         
         // Network
+        // ✅ CHANGE: Updated default from 8 to 16
         let connections = UserDefaults.standard.integer(forKey: "maxConnections")
-        maxConnections = connections > 0 ? connections : 8
+        maxConnections = connections > 0 ? connections : 16
         
         speedLimit = UserDefaults.standard.integer(forKey: "speedLimit")
         interceptBrowser = UserDefaults.standard.bool(forKey: "interceptBrowser")
