@@ -6,8 +6,6 @@ A high-performance download manager for macOS that replaces your browser's defau
 
 <img width="1678" height="1278" alt="CleanShot 2025-12-24 at 13 34 52@2x" src="https://github.com/user-attachments/assets/a3396b1a-9262-4f8b-b300-4d79417a1693" />
 
-<img width="678" height="684" alt="CleanShot 2025-12-24 at 13 35 29@2x" src="https://github.com/user-attachments/assets/4984571a-c634-4b10-a3d2-43f88a19d93c" />
-
 
 ## Features
 
